@@ -29,10 +29,9 @@ module.exports = async (req, res) => {
     }
 
     try {
-        // Parsear el host limpio para evitar que xmlrpc use 127.0.0.1
         const cleanHost = rawUrl.replace(/^https?:\/\//i, '').replace(/\/.*$/, '').trim();
 
-        // 2. Autenticación contra Odoo (Puerto 443 HTTPS directo a odoo.dronena.com)
+        // 2. Autenticación contra Odoo
         const commonClient = xmlrpc.createSecureClient({
             host: cleanHost,
             port: 443,
@@ -42,12 +41,12 @@ module.exports = async (req, res) => {
         const uid = await new Promise((resolve, reject) => {
             commonClient.methodCall('authenticate', [db, username, password, {}], (err, value) => {
                 if (err) return reject(err);
-                if (!value) return reject(new Error('Credenciales de Odoo inválidas (usuario o contraseña errónea)'));
+                if (!value) return reject(new Error('Credenciales de Odoo inválidas'));
                 resolve(value);
             });
         });
 
-        // 3. Cliente de modelos para consultar tickets
+        // 3. Cliente para consulta de datos
         const modelsClient = xmlrpc.createSecureClient({
             host: cleanHost,
             port: 443,
@@ -59,6 +58,7 @@ module.exports = async (req, res) => {
             ['team_id', 'in', [5, 8, 77]]
         ];
 
+        // Solo campos válidos garantizados en Helpdesk
         const fields = [
             'id',
             'name',
@@ -66,8 +66,7 @@ module.exports = async (req, res) => {
             'stage_id',
             'team_id',
             'user_id',
-            'partner_id',
-            'ticket_type'
+            'partner_id'
         ];
 
         const tickets = await new Promise((resolve, reject) => {
