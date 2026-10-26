@@ -1,110 +1,102 @@
-const express = require('express');
-const cors = require('cors');
-const { google } = require('googleapis');
+// api/tickets.js
 const xmlrpc = require('xmlrpc');
 
-const app = express();
-app.use(cors());
-app.use(express.json());
+module.exports = async (req, res) => {
+    // 1. Cabeceras CORS para permitir lectura desde GitHub Pages
+    res.setHeader('Access-Control-Allow-Credentials', true);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
+    res.setHeader(
+        'Access-Control-Allow-Headers',
+        'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version'
+    );
 
-// Cargar credenciales de Google Cloud desde la Variable de Entorno
-const googleCredentials = JSON.parse(process.env.GOOGLE_CREDENTIALS || '{}');
-const auth = new google.auth.GoogleAuth({
-  credentials: googleCredentials,
-  scopes: [
-    'https://www.googleapis.com/auth/spreadsheets.readonly',
-    'https://www.googleapis.com/auth/drive.readonly'
-  ],
-});
+    if (req.method === 'OPTIONS') {
+        return res.status(200).end();
+    }
 
-// 1. ENDPOINT: Odoo Tickets Septiembre en Tiempo Real
-app.get('/api/tickets', (req, res) => {
-  const url = process.env.ODOO_URL;
-  const db = process.env.ODOO_DB;
-  const username = process.env.ODOO_USER;
-  const password = process.env.ODOO_PASSWORD;
+    // Leemos las variables tal cual las tienes en Vercel
+    const url = process.env.ODOO_URL || 'https://odoo.dronena.com';
+    const db = process.env.ODOO_DB || 'dronena';
+    const username = process.env.ODOO_USER || process.env.ODOO_USERNAME;
+    const password = process.env.ODOO_PASSWORD;
 
-  const common = xmlrpc.createSecureClient({ host: url, port: 443, path: '/xmlrpc/2/common' });
-  const models = xmlrpc.createSecureClient({ host: url, port: 443, path: '/xmlrpc/2/object' });
+    if (!username || !password) {
+        return res.status(500).json({ 
+            status: 'error', 
+            message: 'Faltan variables de entorno ODOO_USER o ODOO_PASSWORD en Vercel' 
+        });
+    }
 
-  common.methodCall('authenticate', [db, username, password, {}], (err, uid) => {
-    if (err || !uid) return res.status(500).json({ error: 'Error de autenticación con Odoo' });
+    try {
+        const commonClient = xmlrpc.createSecureClient({
+            url: `${url}/xmlrpc/2/common`
+        });
 
-    const domain = [
-      ['create_date', '>=', '2026-09-01 00:00:00'],
-      ['create_date', '<=', '2026-09-30 23:59:59']
-    ];
+        // 2. Autenticación contra Odoo
+        const uid = await new Promise((resolve, reject) => {
+            commonClient.methodCall('authenticate', [db, username, password, {}], (err, value) => {
+                if (err) return reject(err);
+                if (!value) return reject(new Error('Credenciales de Odoo inválidas'));
+                resolve(value);
+            });
+        });
 
-    models.methodCall('execute_kw', [
-      db, uid, password,
-      'helpdesk.ticket', 'search_read',
-      [domain],
-      { fields: ['name', 'stage_id', 'team_id', 'partner_id', 'create_date'] }
-    ], (err, tickets) => {
-      if (err) return res.status(500).json({ error: 'Error consultando tickets en Odoo' });
-      res.json({ total: tickets.length, data: tickets });
-    });
-  });
-});
+        const modelsClient = xmlrpc.createSecureClient({
+            url: `${url}/xmlrpc/2/object`
+        });
 
-// 2. ENDPOINT: Solicitudes de Pedido Pendientes (> 3 Meses desde Mayo 2026)
-app.get('/api/solicitudes', async (req, res) => {
-  try {
-    const sheets = google.sheets({ version: 'v4', auth });
-    const spreadsheetId = '19jnXufpmtRAdMyoOjDRoLk3Y48B5i7HK_-63yRzXGP0';
+        // 3. Traer los tickets de los 3 equipos (Central: 5, Occidente: 8, Oriente: 77)
+        // Sin filtro de fecha restrictivo para que traiga el año completo 2026
+        const domain = [
+            ['team_id', 'in', [5, 8, 77]]
+        ];
 
-    const response = await sheets.spreadsheets.values.get({
-      spreadsheetId,
-      range: 'Hoja1!A2:Z1000',
-    });
+        const fields = [
+            'id',
+            'name',
+            'create_date',
+            'stage_id',
+            'team_id',
+            'user_id',
+            'partner_id',
+            'ticket_type'
+        ];
 
-    const rows = response.data.values || [];
-    const fechaActual = new Date('2026-09-07');
+        const tickets = await new Promise((resolve, reject) => {
+            modelsClient.methodCall(
+                'execute_kw',
+                [
+                    db,
+                    uid,
+                    password,
+                    'helpdesk.ticket',
+                    'search_read',
+                    [domain],
+                    {
+                        fields: fields,
+                        limit: 5000, // Evita el límite de 80 tickets
+                        order: 'create_date desc'
+                    }
+                ],
+                (err, value) => {
+                    if (err) return reject(err);
+                    resolve(value);
+                }
+            );
+        });
 
-    const pendientes = rows.filter(row => {
-      const fechaCreacion = new Date(row[2]); // Columna Fecha
-      const estatus = row[5];                 // Columna Estatus
-      const diasAntiguedad = (fechaActual - fechaCreacion) / (1000 * 60 * 60 * 24);
+        return res.status(200).json({
+            status: 'success',
+            total: tickets.length,
+            data: tickets
+        });
 
-      return fechaCreacion >= new Date('2026-05-01') && 
-             estatus !== 'Concluido' && 
-             estatus !== 'Cerrado' && 
-             diasAntiguedad > 90;
-    });
-
-    res.json({ data: pendientes });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// 3. ENDPOINT: Asistente Inteligente de Equipos por Farmacia
-app.get('/api/equipos', async (req, res) => {
-  const farmacia = req.query.farmacia ? req.query.farmacia.toLowerCase() : '';
-  try {
-    const sheets = google.sheets({ version: 'v4', auth });
-    const spreadsheetId = '1VT4fA3MTLYF8SS8URdI6SJeKBqgicQsU';
-
-    const response = await sheets.spreadsheets.values.get({
-      spreadsheetId,
-      range: 'Hoja1!A2:Z1000',
-    });
-
-    const rows = response.data.values || [];
-    const filtrados = rows
-      .filter(r => r[0] && r[0].toLowerCase().includes(farmacia))
-      .map(r => ({
-        farmacia: r[0],
-        equipo: r[1],
-        descripcion: r[2],
-        ubicacion: r[3],
-        estatus: r[4]
-      }));
-
-    res.json({ data: filtrados });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-module.exports = app;
+    } catch (error) {
+        console.error('Error al conectar con Odoo:', error);
+        return res.status(500).json({
+            status: 'error',
+            message: error.message || 'Error al consultar Odoo'
+        });
+    }
+};
