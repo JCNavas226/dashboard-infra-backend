@@ -16,7 +16,7 @@ module.exports = async (req, res) => {
     }
 
     // Leemos las variables tal cual las tienes en Vercel
-    const url = process.env.ODOO_URL || 'https://odoo.dronena.com';
+    const rawUrl = process.env.ODOO_URL || 'https://odoo.dronena.com';
     const db = process.env.ODOO_DB || 'dronena';
     const username = process.env.ODOO_USER || process.env.ODOO_USERNAME;
     const password = process.env.ODOO_PASSWORD;
@@ -29,25 +29,32 @@ module.exports = async (req, res) => {
     }
 
     try {
+        // Parsear el host limpio para evitar que xmlrpc use 127.0.0.1
+        const cleanHost = rawUrl.replace(/^https?:\/\//i, '').replace(/\/.*$/, '').trim();
+
+        // 2. Autenticación contra Odoo (Puerto 443 HTTPS directo a odoo.dronena.com)
         const commonClient = xmlrpc.createSecureClient({
-            url: `${url}/xmlrpc/2/common`
+            host: cleanHost,
+            port: 443,
+            path: '/xmlrpc/2/common'
         });
 
-        // 2. Autenticación contra Odoo
         const uid = await new Promise((resolve, reject) => {
             commonClient.methodCall('authenticate', [db, username, password, {}], (err, value) => {
                 if (err) return reject(err);
-                if (!value) return reject(new Error('Credenciales de Odoo inválidas'));
+                if (!value) return reject(new Error('Credenciales de Odoo inválidas (usuario o contraseña errónea)'));
                 resolve(value);
             });
         });
 
+        // 3. Cliente de modelos para consultar tickets
         const modelsClient = xmlrpc.createSecureClient({
-            url: `${url}/xmlrpc/2/object`
+            host: cleanHost,
+            port: 443,
+            path: '/xmlrpc/2/object'
         });
 
-        // 3. Traer los tickets de los 3 equipos (Central: 5, Occidente: 8, Oriente: 77)
-        // Sin filtro de fecha restrictivo para que traiga el año completo 2026
+        // Equipos: 5 (Central), 8 (Occidente) y 77 (Oriente)
         const domain = [
             ['team_id', 'in', [5, 8, 77]]
         ];
@@ -75,7 +82,7 @@ module.exports = async (req, res) => {
                     [domain],
                     {
                         fields: fields,
-                        limit: 5000, // Evita el límite de 80 tickets
+                        limit: 5000,
                         order: 'create_date desc'
                     }
                 ],
